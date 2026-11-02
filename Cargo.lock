@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "passbox-ai"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "passbox-client"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "data-encoding",
  "passbox-core",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "passbox-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "passbox-core-wasm"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "passbox-ffi"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "jni",
  "passbox-client",
