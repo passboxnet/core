@@ -119,6 +119,53 @@ export interface LinkedAccount {
   secretKey: string;
 }
 
+/** A sign-in request of another device (`pbx login`) as the approving browser sees it. */
+export interface CliLoginRequestInfo {
+  id: string;
+  /** Covered by the request's MAC: the name the requesting device registered. */
+  deviceName: string;
+  /** Where the request came from, as the server saw it. */
+  ip: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** The ID and secret of a sign-in link (`#/cli-login/{id}#{secret}`). */
+export interface CliLoginLink {
+  id: string;
+  secret: string;
+}
+
+/**
+ * Reads a sign-in link from a location hash (`#/cli-login/{id}#{secret}`).
+ * Only checks the shape; the secret is checked by the core.
+ */
+export function parseCliLoginLink(hash: string): CliLoginLink | undefined {
+  const match = /^#?\/?cli-login\/([0-9a-z]{26})\/?#([A-Za-z0-9_-]{43})$/.exec(hash);
+  if (!match?.[1] || !match[2]) return undefined;
+  return { id: match[1], secret: match[2] };
+}
+
+/** The sign-in request expired, was cancelled or was already answered. */
+export class CliLoginExpiredError extends Error {
+  constructor() {
+    super("This sign-in request expired or was already answered. Start it again on the other device.");
+    this.name = "CliLoginExpiredError";
+  }
+}
+
+/**
+ * The request the server returned does not match the link: a different key or
+ * device name. Nothing was sent. Either the link is wrong or the server is not
+ * trustworthy.
+ */
+export class CliLoginVerificationError extends Error {
+  constructor() {
+    super("This sign-in request does not match the link. Nothing was sent.");
+    this.name = "CliLoginVerificationError";
+  }
+}
+
 /** The recovery code is incomplete or has a typo (checked on the device). */
 export class InvalidRecoveryCodeError extends Error {
   constructor() {

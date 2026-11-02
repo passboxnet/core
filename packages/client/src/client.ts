@@ -107,6 +107,9 @@ import {
   UNKNOWN_CATEGORY,
 } from "./items";
 import {
+  CliLoginExpiredError,
+  type CliLoginRequestInfo,
+  CliLoginVerificationError,
   type CodeRecoveryStart,
   type DeviceLinkStart,
   type DeviceLinkState,
@@ -484,6 +487,13 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Maps recovery error codes to typed errors. */
 function recoveryError(error: unknown): unknown {
   if (error instanceof ApiError && error.code === "recovery_expired") return new RecoveryExpiredError();
+  return error;
+}
+
+function cliLoginError(error: unknown): unknown {
+  if (error instanceof ApiError && (error.code === "cli_login_expired" || error.status === 404)) {
+    return new CliLoginExpiredError();
+  }
   return error;
 }
 
@@ -3355,6 +3365,92 @@ export class PassboxClient {
   cancelDeviceLinkClaim(): void {
     this.deviceLinkRequest?.request.free();
     this.deviceLinkRequest = undefined;
+  }
+
+  // --- Signing in another device from this browser (pbx login) ------------------------
+
+  private cliLoginApproval(id: string, secret: string): Core.CliLoginApproval {
+    try {
+      return new this.core.CliLoginApproval(id, secret);
+    } catch {
+      throw new CliLoginVerificationError();
+    }
+  }
+
+  /**
+   * The sign-in request a link points to (ID and secret from its fragment),
+   * after checking that the key and device name are the ones the requesting
+   * device registered. Throws `CliLoginExpiredError` or
+   * `CliLoginVerificationError`.
+   */
+  async cliLoginRequest(id: string, secret: string): Promise<CliLoginRequestInfo> {
+    this.requireKeyring();
+    const approval = this.cliLoginApproval(id, secret);
+    try {
+      let info: Awaited<ReturnType<typeof this.api.cliLogins.get>>;
+      try {
+        info = await this.api.cliLogins.get(id);
+      } catch (error) {
+        throw cliLoginError(error);
+      }
+      try {
+        approval.verify(info.ephemeralKey, info.deviceName, info.mac);
+      } catch {
+        throw new CliLoginVerificationError();
+      }
+      return {
+        id: info.id,
+        deviceName: info.deviceName,
+        ip: info.ip,
+        createdAt: info.createdAt,
+        expiresAt: info.expiresAt,
+      };
+    } finally {
+      approval.free();
+    }
+  }
+
+  /**
+   * Sends the email, account ID and Secret Key to the requesting device,
+   * sealed to its key. The master password is never sent: the device asks
+   * for it. Nothing is sent if the request does not match the link.
+   */
+  async approveCliLogin(id: string, secret: string): Promise<void> {
+    this.requireKeyring();
+    const account = this.deviceAccount;
+    if (!account) throw new CliLoginExpiredError();
+    const approval = this.cliLoginApproval(id, secret);
+    try {
+      let sealed: string;
+      try {
+        const info = await this.api.cliLogins.get(id);
+        const payload: LinkedAccount = {
+          email: account.email,
+          accountId: account.accountId,
+          secretKey: account.secretKey,
+        };
+        try {
+          sealed = approval.seal(info.ephemeralKey, info.deviceName, info.mac, JSON.stringify(payload));
+        } catch {
+          throw new CliLoginVerificationError();
+        }
+        await this.api.cliLogins.approve(id, sealed);
+      } catch (error) {
+        throw cliLoginError(error);
+      }
+    } finally {
+      approval.free();
+    }
+  }
+
+  /** Denies a sign-in request; the requesting device is told. */
+  async denyCliLogin(id: string): Promise<void> {
+    this.requireKeyring();
+    try {
+      await this.api.cliLogins.deny(id);
+    } catch (error) {
+      throw cliLoginError(error);
+    }
   }
 
   // --- Single sign-on and trusted devices -----------------------------------------

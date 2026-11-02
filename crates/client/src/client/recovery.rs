@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use passbox_core::device_link::{DeviceLinkOffer, DeviceLinkRequest};
+use passbox_core::device_link::{
+    CliLoginApproval, CliLoginRequest, DeviceLinkOffer, DeviceLinkRequest,
+};
 use passbox_core::emergency::EmergencyGrantInfo;
 use passbox_core::kdf::{self, KdfParams, MasterKeys};
 use passbox_core::keyring::{AccountKeysUpload, Keyring};
@@ -57,6 +59,9 @@ pub(crate) struct RecoveryState {
     offers: BTreeMap<String, DeviceLinkOffer>,
     /// The device code this (new) device entered, with the claim token.
     claim: Option<(DeviceLinkRequest, String)>,
+    /// A sign-in this device (without a session) asked a browser for, with
+    /// the poll token.
+    cli_login: Option<(CliLoginRequest, String)>,
 }
 
 /// The first step of a recovery by code.
@@ -232,6 +237,58 @@ pub struct LinkedAccount {
     pub email: String,
     pub account_id: String,
     pub secret_key: String,
+}
+
+/// A sign-in request this device registered (see [`Client::start_cli_login`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliLoginStart {
+    pub id: String,
+    /// Open it in a signed-in browser: the web vault's approval page. The
+    /// secret is in the fragment, which is never sent to a server. Show it
+    /// only to the user.
+    pub url: String,
+    pub expires_at: i64,
+}
+
+/// The state of a sign-in request, as the requesting device sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliLoginPoll {
+    /// Not answered yet.
+    Pending,
+    /// Approved: the account details (sign in with them and the master
+    /// password) and the name of the device that approved.
+    Approved {
+        account: LinkedAccount,
+        approved_by: String,
+    },
+    /// Denied in the browser.
+    Denied,
+    /// Expired (10 minutes) or cancelled.
+    Expired,
+}
+
+/// A sign-in request as the approving (signed-in) device sees it. The
+/// device name is covered by the MAC; IP and time come from the server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliLoginInfo {
+    pub id: String,
+    pub device_name: String,
+    pub ip: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    #[serde(default)]
+    ephemeral_key: String,
+    #[serde(default)]
+    mac: String,
+}
+
+fn cli_login_expired() -> Error {
+    Error::Server {
+        status: 403,
+        code: "cli_login_expired".into(),
+        message: "the sign-in request expired or was already answered; start it again".into(),
+    }
 }
 
 fn expired() -> Error {
@@ -1165,5 +1222,154 @@ impl Client {
             .ok_or_else(invalid_device_code)?;
         let payload = request.open(result["sealedPayload"].as_str().unwrap_or_default())?;
         Ok(Some(serde_json::from_str(&payload)?))
+    }
+
+    // --- Signing in a new device from a signed-in browser ------------------------------
+
+    /// On a device without a session (`pbx login`): registers a sign-in
+    /// request and returns the link to open in a signed-in browser (valid
+    /// 10 minutes). Poll with [`Client::poll_cli_login`].
+    pub fn start_cli_login(&self) -> Result<CliLoginStart> {
+        let (device_name, _) = self.device_fields();
+        let request = CliLoginRequest::new(&device_name)?;
+        let created = self.anonymous(
+            "POST",
+            "/api/v1/cli-logins",
+            json!({
+                "id": request.id(),
+                "ephemeralKey": encoding::encode(&request.public_key()),
+                "mac": encoding::encode(request.mac()),
+                "deviceName": request.device_name(),
+            }),
+        )?;
+        let token = created["pollToken"].as_str().unwrap_or_default().to_owned();
+        let start = CliLoginStart {
+            id: request.id().to_owned(),
+            url: format!("{}/{}", self.api.base_url(), request.link_fragment()),
+            expires_at: created["expiresAt"].as_i64().unwrap_or_default(),
+        };
+        self.lock_recovery().cli_login = Some((request, token));
+        Ok(start)
+    }
+
+    /// Whether the browser answered. The account details arrive once.
+    pub fn poll_cli_login(&self) -> Result<CliLoginPoll> {
+        let token = self
+            .lock_recovery()
+            .cli_login
+            .as_ref()
+            .map(|(_, token)| token.clone())
+            .ok_or_else(cli_login_expired)?;
+        let result = match self.anonymous(
+            "POST",
+            "/api/v1/cli-logins/poll",
+            json!({ "pollToken": token }),
+        ) {
+            Ok(result) => result,
+            Err(Error::Server { code, .. }) if code == "cli_login_expired" => {
+                self.lock_recovery().cli_login = None;
+                return Ok(CliLoginPoll::Expired);
+            }
+            Err(other) => return Err(other),
+        };
+        let status = result["status"].as_str().unwrap_or_default();
+        if status == "pending" {
+            return Ok(CliLoginPoll::Pending);
+        }
+        let (request, _) = self
+            .lock_recovery()
+            .cli_login
+            .take()
+            .ok_or_else(cli_login_expired)?;
+        match status {
+            "approved" => {
+                let payload = request.open(result["sealedPayload"].as_str().unwrap_or_default())?;
+                Ok(CliLoginPoll::Approved {
+                    account: serde_json::from_str(&payload)?,
+                    approved_by: result["approvedBy"].as_str().unwrap_or_default().to_owned(),
+                })
+            }
+            "denied" => Ok(CliLoginPoll::Denied),
+            _ => Ok(CliLoginPoll::Expired),
+        }
+    }
+
+    /// Withdraws the request (for example on Ctrl+C).
+    pub fn cancel_cli_login(&self) -> Result<()> {
+        let Some((_, token)) = self.lock_recovery().cli_login.take() else {
+            return Ok(());
+        };
+        self.anonymous(
+            "POST",
+            "/api/v1/cli-logins/cancel",
+            json!({ "pollToken": token }),
+        )?;
+        Ok(())
+    }
+
+    /// On the signed-in device: the request a link points to (`id` and
+    /// `secret` from its fragment), after checking that the key and the
+    /// device name are the ones the requesting device registered.
+    pub fn cli_login_request(&self, id: &str, secret: &str) -> Result<CliLoginInfo> {
+        let approval = CliLoginApproval::new(id, secret).map_err(|_| cli_login_expired())?;
+        let info = self.fetch_cli_login(&approval)?;
+        approval
+            .verify(
+                &encoding::decode(&info.ephemeral_key)?,
+                &info.device_name,
+                &encoding::decode(&info.mac)?,
+            )
+            .map_err(|_| cli_login_expired())?;
+        Ok(info)
+    }
+
+    fn fetch_cli_login(&self, approval: &CliLoginApproval) -> Result<CliLoginInfo> {
+        let value = self.call(
+            "GET",
+            &format!("/api/v1/cli-logins/{}", approval.id()),
+            None,
+        )?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Sends the email, account ID and Secret Key to the requesting device,
+    /// sealed to its key. Fails (and sends nothing) if the request does not
+    /// match the link.
+    pub fn approve_cli_login(&self, id: &str, secret: &str) -> Result<()> {
+        let account = self.device_account()?.ok_or(Error::NoAccount)?;
+        let approval = CliLoginApproval::new(id, secret).map_err(|_| cli_login_expired())?;
+        let info = self.fetch_cli_login(&approval)?;
+        let payload = Zeroizing::new(serde_json::to_string(&LinkedAccount {
+            email: account.email,
+            account_id: account.account_id,
+            secret_key: account.secret_key,
+        })?);
+        let sealed = approval
+            .seal(
+                &encoding::decode(&info.ephemeral_key)?,
+                &info.device_name,
+                &encoding::decode(&info.mac)?,
+                &payload,
+            )
+            .map_err(|_| cli_login_expired())?;
+        self.call(
+            "POST",
+            &format!("/api/v1/cli-logins/{id}/approve"),
+            Some(json!({ "sealedPayload": sealed })),
+        )?;
+        Ok(())
+    }
+
+    /// Denies the request; the requesting device is told.
+    pub fn deny_cli_login(&self, id: &str) -> Result<()> {
+        if !id::is_valid_id(id) {
+            return Err(cli_login_expired());
+        }
+        self.call(
+            "POST",
+            &format!("/api/v1/cli-logins/{id}/deny"),
+            Some(json!({})),
+        )?;
+        Ok(())
     }
 }

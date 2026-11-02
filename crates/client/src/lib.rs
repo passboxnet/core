@@ -28,9 +28,9 @@ pub use client::item_tools::{
     ItemUsage, ItemVersion, UsageKind,
 };
 pub use client::recovery::{
-    CodeRecoveryStart, DeviceLinkStart, DeviceLinkState, EmergencyContact, EmergencyContacts,
-    EmergencyVaults, LinkedAccount, OrgRecovery, PendingOrgRecovery, RecoveryRequest,
-    RecoveryResult, RecoveryStatus,
+    CliLoginInfo, CliLoginPoll, CliLoginStart, CodeRecoveryStart, DeviceLinkStart, DeviceLinkState,
+    EmergencyContact, EmergencyContacts, EmergencyVaults, LinkedAccount, OrgRecovery,
+    PendingOrgRecovery, RecoveryRequest, RecoveryResult, RecoveryStatus,
 };
 pub use client::sharing::{
     Invitation, InvitationInfo, InvitationPreview, VaultAccess, parse_invitation_link,

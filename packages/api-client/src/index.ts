@@ -4,6 +4,8 @@ import { type ComfortApi, comfortApi } from "./comfort";
 import { type DeveloperApi, developerApi } from "./developer";
 import { type OrgAdminApi, orgAdminApi } from "./orgAdmin";
 import {
+  type CliLoginApi,
+  cliLoginApi,
   type DeviceLinkApi,
   deviceLinkApi,
   type EmergencyApi,
@@ -716,6 +718,8 @@ export interface PassboxApi extends AdminApi, CloudApi {
   emergency: EmergencyApi;
   /** Adding a device by code. */
   deviceLinks: DeviceLinkApi;
+  /** Signing in `pbx` (or another device without a session) from this browser. */
+  cliLogins: CliLoginApi;
   /** Single sign-on, trusted devices and SCIM. */
   sso: SsoApi;
   /** Organization administration: policies, audit log, reports. */
@@ -860,6 +864,7 @@ export function createClient(options: ClientOptions = {}): PassboxApi {
     recovery: recoveryApi(call),
     emergency: emergencyApi(call),
     deviceLinks: deviceLinkApi(call),
+    cliLogins: cliLoginApi(call),
     sso: ssoApi(call),
     orgAdmin: orgAdminApi(call),
     breach: breachApi(

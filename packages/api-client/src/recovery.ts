@@ -130,6 +130,17 @@ export interface DeviceLinkInfo {
   claimedAt: number;
 }
 
+/** A pending sign-in request of another device (`pbx login`), for the approver. */
+export interface CliLoginInfo {
+  id: string;
+  deviceName: string;
+  ip: string;
+  createdAt: number;
+  expiresAt: number;
+  ephemeralKey: string;
+  mac: string;
+}
+
 export interface RecoveryApi {
   status(): Promise<RecoveryStatus>;
   /** Needs a login in the last 10 minutes. */
@@ -206,6 +217,27 @@ export interface DeviceLinkApi {
   poll(claimToken: string): Promise<{ status: "claimed" | "approved"; sealedPayload?: string }>;
 }
 
+/** Signing in a device without a session (`pbx login`) from a signed-in browser. */
+export interface CliLoginApi {
+  /** Approver (signed in): the pending request. */
+  get(id: string): Promise<CliLoginInfo>;
+  approve(id: string, sealedPayload: string): Promise<void>;
+  deny(id: string): Promise<void>;
+  /** Requesting device (no session). */
+  create(req: {
+    id: string;
+    ephemeralKey: string;
+    mac: string;
+    deviceName: string;
+  }): Promise<{ pollToken: string; expiresAt: number }>;
+  poll(pollToken: string): Promise<{
+    status: "pending" | "approved" | "denied" | "expired";
+    sealedPayload?: string;
+    approvedBy?: string;
+  }>;
+  cancel(pollToken: string): Promise<void>;
+}
+
 type Call = <T>(method: string, path: string, body?: unknown) => Promise<T>;
 
 export function recoveryApi(call: Call): RecoveryApi {
@@ -260,5 +292,17 @@ export function deviceLinkApi(call: Call): DeviceLinkApi {
     cancel: (id) => call("DELETE", link(id)),
     claim: (req) => call("POST", "/api/v1/device-links/claim", req),
     poll: (claimToken) => call("POST", "/api/v1/device-links/poll", { claimToken }),
+  };
+}
+
+export function cliLoginApi(call: Call): CliLoginApi {
+  const request = (id: string) => `/api/v1/cli-logins/${encodeURIComponent(id)}`;
+  return {
+    get: (id) => call("GET", request(id)),
+    approve: (id, sealedPayload) => call("POST", `${request(id)}/approve`, { sealedPayload }),
+    deny: (id) => call("POST", `${request(id)}/deny`, {}),
+    create: (req) => call("POST", "/api/v1/cli-logins", req),
+    poll: (pollToken) => call("POST", "/api/v1/cli-logins/poll", { pollToken }),
+    cancel: (pollToken) => call("POST", "/api/v1/cli-logins/cancel", { pollToken }),
   };
 }

@@ -2,9 +2,9 @@
 
 > **Draft.** Not reviewed by cryptographers and not audited. Formats may still change before the first release that ships them.
 
-This document describes recovery through an organization or family, the personal recovery code, emergency access and adding a device with a code. It builds on the key hierarchy in [cryptography.md](cryptography.md) and the key pairs, key directory and organizations in [sharing.md](sharing.md).
+This document describes recovery through an organization or family, the personal recovery code, emergency access, adding a device with a code and signing in `pbx` from the browser. It builds on the key hierarchy in [cryptography.md](cryptography.md) and the key pairs, key directory and organizations in [sharing.md](sharing.md).
 
-All cryptography is in [`crates/core`](../../crates/core): `recovery::code`, `recovery::org`, `emergency` and `device_link`. The web app and the extension use it through `@passbox/core-wasm` and [`packages/client`](../../packages/client) (`PassboxClient`), the native apps through [`crates/client`](../../crates/client) and the FFI ([`crates/ffi/src/recovery.rs`](../../crates/ffi/src/recovery.rs)). The server (passboxnet/server: [`src/api/recovery.rs`](https://github.com/passboxnet/server/blob/main/src/api/recovery.rs), `org_recovery.rs`, `emergency.rs`, `device_links.rs`, [`migrations/0001_baseline.sql`](https://github.com/passboxnet/server/blob/main/migrations/0001_baseline.sql)) stores sealed data and enforces who gets it when.
+All cryptography is in [`crates/core`](../../crates/core): `recovery::code`, `recovery::org`, `emergency` and `device_link`. The web app and the extension use it through `@passbox/core-wasm` and [`packages/client`](../../packages/client) (`PassboxClient`), the native apps through [`crates/client`](../../crates/client) and the FFI ([`crates/ffi/src/recovery.rs`](../../crates/ffi/src/recovery.rs)). The server (passboxnet/server: [`src/api/recovery.rs`](https://github.com/passboxnet/server/blob/main/src/api/recovery.rs), `org_recovery.rs`, `emergency.rs`, `device_links.rs`, `cli_logins.rs`, [`migrations/0001_baseline.sql`](https://github.com/passboxnet/server/blob/main/migrations/0001_baseline.sql)) stores sealed data and enforces who gets it when.
 
 ## What recovery means here
 
@@ -114,6 +114,41 @@ payload    = Seal(ephemeral_pk, {"email", "accountId", "secretKey"}, purpose "de
 3. The signed-in device polls the link, shows the new device's name and IP and asks "Was that you?". Approving checks the MAC (a server that swapped in its own ephemeral key would have to know the secret) and uploads the sealed payload.
 4. The new device receives the payload once and asks for the **master password**, which is never transferred. It then signs in normally (with a second factor if the account uses one).
 
+## Signing in pbx from the browser
+
+`pbx login` (and `pbx` without a command on a machine that is not signed in) works like `npm login`: the command line opens a link, the user approves in the web vault where they are already signed in, and then types the master password in the terminal. It is the device code flow above in the other direction: the device **without** a session starts, the signed-in browser approves.
+
+```text
+id         = 26-character ID chosen by the requesting device (passbox_core::id)
+secret     = 32 random bytes, Base64url; only in the link's fragment, never sent to a server
+mac_key    = HKDF-SHA256(ikm = secret, salt = id, info = "passbox/v1/cli-login")
+mac        = HMAC-SHA256(mac_key, canonical("passbox/v1/cli-login-request", id, ephemeral_pk, device_name))
+payload    = Seal(ephemeral_pk, {"email", "accountId", "secretKey"}, purpose "device-link",
+                  context canonical("passbox/v1/seal-context/cli-login", id))
+link       = <web vault>/#/cli-login/{id}#{secret}
+```
+
+`device_link::CliLoginRequest` is the requesting side, `device_link::CliLoginApproval` the approving side (WebAssembly: `CliLoginRequest`, `CliLoginApproval`). The MAC key, the MAC input and the seal context have labels of their own, so nothing from one direction verifies in the other; the payload and the seal purpose are those of the device code flow. The MAC also covers the device name, so the name the approver sees is the one the device registered.
+
+1. **Request (no session).** `pbx` creates the ID, the secret and an ephemeral X-Wing key pair and registers ID, public key, device name and MAC (`POST /api/v1/cli-logins`). The server stores them with the client IP, the time and the SHA-256 hash of a poll token it returns. `pbx` prints the link and, after Enter, opens it in the default browser; over SSH (or without a display) it only prints it, so the user can open it on another machine. The link is shown only on the terminal.
+2. **Approval page.** The web vault reads the fragment before anything renders, keeps the ID and secret for this tab (session storage, 10 minutes) and replaces the address with `#/cli-login/{id}`, so the secret leaves the address bar and the history. A signed-out or locked browser signs in first (the sign-in screen says why) and then returns to the request. The browser fetches the request (`GET /api/v1/cli-logins/{id}`, with its session) and checks the MAC with the secret. It shows **"Sign in pbx {device}?"** with the device name, the IP the request came from and the time, a warning that the device gets the email and Secret Key and **with the master password full access to the account**, and "Only approve if you just ran pbx login yourself. Never approve a link someone sent you." **Approve** is enabled only after ticking "I started this sign-in myself".
+3. **Answer.** Approving verifies the MAC again, seals the payload to the ephemeral key and uploads it (`POST /api/v1/cli-logins/{id}/approve`); **Deny** tells the device (`POST /api/v1/cli-logins/{id}/deny`). Both are logged for the account (`cli_login_approved`, `cli_login_denied`). A request can be answered once and only while it is valid.
+4. **Receiving.** `pbx` polls every two seconds with its token (`POST /api/v1/cli-logins/poll`) and shows a spinner with the remaining time. The answer (`approved` with the sealed payload and the approving session's device name, or `denied`) is delivered once; then the server deletes the request. `pbx` opens the payload, shows the email and the approving device, asks for the **master password** (hidden, never transferred; three tries, since the approval cannot be reused), handles a second factor like any sign-in and stores the account and the encrypted offline copy as `pbx login --email` does. Ctrl+C while waiting withdraws the request (`POST /api/v1/cli-logins/cancel`).
+
+Requests are valid for **10 minutes**. Without a terminal, or with `CI` set, `pbx` never starts this flow (or any prompt) and points to service accounts instead ([service-accounts.md](service-accounts.md)).
+
+### Threat analysis
+
+| Threat | What happens |
+| --- | --- |
+| **Malicious server swaps the ephemeral key** (to receive the payload itself) | The browser checks the MAC under the secret from the fragment, which the server never sees; a different key (or device name) fails with "This request does not match the link. Nothing was sent." Forging the MAC means guessing 256 bits. |
+| **Server or network reads the link** | Only the fragment carries the secret; browsers do not send fragments, and the web vault removes it from the address bar on load. The ID alone lets a signed-in account read the request, which holds nothing secret. |
+| **Phishing: someone sends a victim their own `pbx login` link** | The attacker's terminal would receive the victim's email and Secret Key if the victim approves. They still need the master password (and the second factor, if 2FA is on), but the Secret Key is one of the two factors. Mitigations: the page names the device, the IP and the time prominently, says plainly that a **new device** gets full access with the master password and that links from others must never be approved, and requires an explicit "I started this sign-in myself". Approvals are only possible for 10 minutes after the request, are logged in the activity log and work once. An approved attacker gains nothing they could use without the master password; the victim should still treat an accidental approval like a leaked Emergency Kit (change the master password, which keeps the Secret Key, or recover with a new Secret Key). |
+| **Someone else answers a request** | Approving needs a signed-in session in the browser that opened the link. Another account that learned the ID could only seal **its own** details to the device; the device then shows that email, and signing in needs that account's master password. |
+| **Malicious server answers by itself** | It knows the ephemeral public key, so it can seal a payload of its choosing (as with device codes) or claim a denial. `pbx` shows the email it received before asking for the master password; the password is protected by OPAQUE either way (the server learns nothing it can test offline), and the real Secret Key never reaches the server. |
+| **Flooding** | Creating requests needs no session, so it is limited: 10 new requests per IP and hour, at most 3 open requests per IP, 300 new requests per minute on the server, plus the general per-IP authentication limit; polling to 120 per IP and minute. Expired requests are deleted. |
+| **Replay of a poll token or an approval** | Poll tokens are 256-bit random values stored as hashes; the answer is delivered once and the row deleted. The seal context binds the payload to the request ID. |
+
 ## Threat model
 
 The server is untrusted for confidentiality, as in [cryptography.md](cryptography.md#goals). For recovery:
@@ -129,11 +164,12 @@ The server is untrusted for confidentiality, as in [cryptography.md](cryptograph
 | forge an escrow, an approval or an emergency grant | they are signed by the member, the approving admin and the grantor; signatures are checked against verified keys |
 | make a grantor seal vault keys to a key the server controls | the grantee's key comes from the key directory (pinned, changes are flagged) and the grantor can compare fingerprints |
 | take over a new device through the device code | the claim is authenticated with a MAC under a secret the server never sees; the master password is never sent |
+| make a browser approve `pbx login` for a key the server controls | the request is authenticated with a MAC under the secret in the link's fragment, which the server never sees |
 
 What it **can** still do (honest list):
 
 - **Release emergency access early.** The waiting period is enforced by the server. It can also withhold the release, a decline or a request.
-- **Deny service.** Refuse or delay recoveries, drop mails, claim device links first (the user then sees an error and shows a new code).
+- **Deny service.** Refuse or delay recoveries, drop mails, claim device links first (the user then sees an error and shows a new code), drop or fake answers to `pbx login` requests.
 - **See metadata:** who set up a recovery code (not the code), who escrowed with which organization, who requested recovery when and from which IP, who trusts whom, waiting periods and which vault IDs are in a grant.
 - **Trust on first use** in the key directory applies as in [sharing.md](sharing.md#goals-and-threat-model): if the grantor never compares fingerprints and the server shows a fake key on first contact, the grantor seals to the server's key. Fingerprints are shown for exactly this reason.
 
@@ -145,11 +181,11 @@ Trust that remains by design:
 
 ## Server storage and limits
 
-Migration [`0001_baseline.sql`](https://github.com/passboxnet/server/blob/main/migrations/0001_baseline.sql): `account_recovery` (second OPAQUE record and wrap), `recovery_attempts`, `recovery_sessions` (token hashes, single use, 15 minutes), `org_recovery_keys`, `org_recovery_grants`, `org_recovery_escrows`, `org_recovery_requests` (token hashes, 48 hours), `emergency_grants`, `device_links` (claim token hashes, 10 minutes). Every request runs in a transaction that names its context first (`crate::db::Db`), and the tables have forced row level security ([database-security.md](database-security.md)).
+Migration [`0001_baseline.sql`](https://github.com/passboxnet/server/blob/main/migrations/0001_baseline.sql): `account_recovery` (second OPAQUE record and wrap), `recovery_attempts`, `recovery_sessions` (token hashes, single use, 15 minutes), `org_recovery_keys`, `org_recovery_grants`, `org_recovery_escrows`, `org_recovery_requests` (token hashes, 48 hours), `emergency_grants`, `device_links` (claim token hashes, 10 minutes); [`0007_cli_logins.sql`](https://github.com/passboxnet/server/blob/main/migrations/0007_cli_logins.sql): `cli_logins` (poll token hashes, 10 minutes; only the sign-in context sees the table, signed-in accounts read and answer one pending request by ID through `passbox.pending_cli_login` and `passbox.decide_cli_login`). Every request runs in a transaction that names its context first (`crate::db::Db`), and the tables have forced row level security ([database-security.md](database-security.md)).
 
-Rate limits (in memory, per server process): recovery-code logins share the per-IP authentication limit and count failures per (email, IP) (10), per email (20) and per IP (100) in 15 minutes; the second factor uses the two-factor limits; organization recovery requests are limited to 10 per IP and 3 per email per hour; emergency invitations to 20 per account per hour and 20 contacts per account; device link claims to 10 per IP per minute and 5 open links per account.
+Rate limits (in memory, per server process): recovery-code logins share the per-IP authentication limit and count failures per (email, IP) (10), per email (20) and per IP (100) in 15 minutes; the second factor uses the two-factor limits; organization recovery requests are limited to 10 per IP and 3 per email per hour; emergency invitations to 20 per account per hour and 20 contacts per account; device link claims to 10 per IP per minute and 5 open links per account; `pbx login` requests to 10 per IP and hour, 3 open per IP and 300 per minute per server process, polls to 120 per IP and minute.
 
-Events (`account_events`): `account_recovery_code_created`/`_removed`, `account_recovery_failed`, `account_recovered_code`, `account_recovered_org`, `login_recovered`, `org_recovery_enabled`, `org_recovery_admin_added`, `org_recovery_enrolled`/`_withdrawn`, `org_recovery_requested`/`_approved`/`_denied`, `org_member_recovered`, `emergency_contact_added`/`_removed`, `emergency_invitation_accepted`, `emergency_access_confirmed`/`_requested`/`_approved`/`_denied`/`_used`, `device_link_created`/`_approved`.
+Events (`account_events`): `account_recovery_code_created`/`_removed`, `account_recovery_failed`, `account_recovered_code`, `account_recovered_org`, `login_recovered`, `org_recovery_enabled`, `org_recovery_admin_added`, `org_recovery_enrolled`/`_withdrawn`, `org_recovery_requested`/`_approved`/`_denied`, `org_member_recovered`, `emergency_contact_added`/`_removed`, `emergency_invitation_accepted`, `emergency_access_confirmed`/`_requested`/`_approved`/`_denied`/`_used`, `device_link_created`/`_approved`, `cli_login_approved`/`_denied`.
 
 Mails (English and German, `src/mail/templates.rs` in passboxnet/server): `recovery_code_created`, `recovery_used`, `recovery`, `recovery_requested`, `recovery_approved`, `recovery_denied`, `emergency_access_invited`, `emergency_access`, `emergency_access_approved`, `emergency_access_denied`, `emergency_access_used`.
 
@@ -163,14 +199,15 @@ Mails (English and German, `src/mail/templates.rs` in passboxnet/server): `recov
 | Requesting device | `requestOrgRecovery`, `pendingOrgRecovery`, `checkOrgRecovery`, `cancelOrgRecovery` | same |
 | Emergency access | `emergencyContacts`, `addEmergencyContact`, `acceptEmergencyInvitation`, `confirmEmergencyContact` (returns the fingerprint), `requestEmergencyAccess`, `approveEmergencyAccess`, `denyEmergencyAccess`, `removeEmergencyContact`, `openEmergencyAccess`, `resealEmergencyAccess` (after unlock) | same |
 | Device code | `startDeviceLink`, `deviceLinkStatus`, `approveDeviceLink`, `cancelDeviceLink`, `claimDeviceLink`, `pollDeviceLink`, `isDeviceCode` | same; FFI `is_device_code` |
+| Signing in pbx from the browser | approving: `cliLoginRequest(id, secret)`, `approveCliLogin`, `denyCliLogin`, `parseCliLoginLink`; requesting: `api.cliLogins` with `CliLoginRequest` (WebAssembly) | requesting: `start_cli_login` (returns the link), `poll_cli_login`, `cancel_cli_login`; approving: `cli_login_request`, `approve_cli_login`, `deny_cli_login` (not in the FFI yet) |
 
 Endpoints are listed in [docs/api/openapi.yaml](https://github.com/passboxnet/server/blob/main/docs/api/openapi.yaml) under the tags `recovery`, `emergency` and `devices`.
 
 ## Tests
 
-- Core: known-answer test of the recovery code encoding and derivation (computed independently with Python's `hashlib`/`hmac`), checksum and typo handling, wrong code, wrong account, tampering (`recovery::code`); organization recovery end to end, a swapped ephemeral key, forged approvals, bundles and escrows (`recovery::org::tests`); emergency access, tampering, wrong recipients and waiting-period bounds (`emergency`); device links with a swapped key and wrong codes (`device_link`).
-- Server (passboxnet/server): `tests/api/recovery.rs` (PostgreSQL with row level security): recovery code with and without a second factor, fake answers for unknown emails, single-use tokens, revoked sessions, rate limits; organization recovery with forged approvals, wrong request tokens, denial and opt-out; emergency access with signed waiting period checks, versions, decline, release after the waiting period and removal; device links.
-- Rust client: `tests/client_recovery.rs` in passboxnet/server. TypeScript: `packages/client/src/recovery.integration.test.ts`. Swift and Kotlin bindings: `RecoveryIntegrationTests.swift` (passboxnet/ios), `FfiRecoveryTest.kt` (passboxnet/android). Web: unit tests and `e2e/tests/recovery.spec.ts` in passboxnet/web (recovery code, emergency access).
+- Core: known-answer test of the recovery code encoding and derivation (computed independently with Python's `hashlib`/`hmac`), checksum and typo handling, wrong code, wrong account, tampering (`recovery::code`); organization recovery end to end, a swapped ephemeral key, forged approvals, bundles and escrows (`recovery::org::tests`); emergency access, tampering, wrong recipients and waiting-period bounds (`emergency`); device links with a swapped key and wrong codes, `pbx login` requests with a swapped key, a renamed device, a wrong secret and payloads of the other direction (`device_link`).
+- Server (passboxnet/server): `tests/api/recovery.rs` (PostgreSQL with row level security): recovery code with and without a second factor, fake answers for unknown emails, single-use tokens, revoked sessions, rate limits; organization recovery with forged approvals, wrong request tokens, denial and opt-out; emergency access with signed waiting period checks, versions, decline, release after the waiting period and removal; device links; `tests/api/cli_logins.rs` (approve, deny, cancel, expiry, single delivery, rate limits) and the row level security of `cli_logins` in `tests/api/rls.rs`.
+- Rust client: `tests/client_recovery.rs` in passboxnet/server. TypeScript: `packages/client/src/recovery.integration.test.ts`. Swift and Kotlin bindings: `RecoveryIntegrationTests.swift` (passboxnet/ios), `FfiRecoveryTest.kt` (passboxnet/android). Web: unit tests and `e2e/tests/recovery.spec.ts` in passboxnet/web (recovery code, emergency access), `e2e/tests/cli-login.spec.ts` (real `pbx login` approved and denied in the browser). CLI: `tests/login.rs` in passboxnet/cli (the flow in a pseudo-terminal, Ctrl+C, and that nothing prompts without a terminal or with `CI` set).
 
 ## Open issues
 
@@ -180,4 +217,5 @@ Endpoints are listed in [docs/api/openapi.yaml](https://github.com/passboxnet/se
 - Security keys as the second factor of a recovery by code.
 - Emergency "full takeover" (deliberately not implemented, see above), reminder mails during the waiting period, and a mail when the waiting period ends without action.
 - Device codes: QR scanning in the web app, and handing over a session (the new device always needs the master password).
+- `pbx login`: approving from the mobile and desktop apps (the Rust client has the approving side; the FFI and the apps do not yet), and a mail when a request is approved.
 - Mobile UIs (the FFI is complete).

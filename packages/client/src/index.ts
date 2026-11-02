@@ -138,6 +138,10 @@ export {
   wifiQrPayload,
 } from "./items";
 export {
+  CliLoginExpiredError,
+  type CliLoginLink,
+  type CliLoginRequestInfo,
+  CliLoginVerificationError,
   type CodeRecoveryStart,
   type DeviceLinkStart,
   type DeviceLinkState,
@@ -149,6 +153,7 @@ export {
   type OrgRecoveryInfo,
   type OrgRecoveryRequestStatus,
   type PendingOrgRecovery,
+  parseCliLoginLink,
   RecoveryExpiredError,
   type RecoveryOptions,
   type RecoveryRequest,

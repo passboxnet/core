@@ -11,6 +11,7 @@
 
 use passbox_core::aead::{KEY_LEN, SymmetricKey};
 use passbox_core::device_link::{
+    CliLoginApproval as CoreCliLoginApproval, CliLoginRequest as CoreCliLoginRequest,
     DeviceLinkOffer as CoreDeviceLinkOffer, DeviceLinkRequest as CoreDeviceLinkRequest,
 };
 use passbox_core::emergency::EmergencyKeys as CoreEmergencyKeys;
@@ -1433,6 +1434,107 @@ impl DeviceLinkRequest {
     /// Opens the sealed payload (JSON).
     pub fn open(&self, sealed: &str) -> Result<String, JsValue> {
         self.0.open(sealed).map_err(js_error)
+    }
+}
+
+/// A device without a session asking a signed-in browser for the account
+/// details (the side `pbx login` takes; see `CliLoginApproval`).
+#[wasm_bindgen]
+pub struct CliLoginRequest(CoreCliLoginRequest);
+
+#[wasm_bindgen]
+impl CliLoginRequest {
+    /// A fresh ID, secret and ephemeral key. The device name is cleaned like
+    /// the server stores it.
+    #[wasm_bindgen(constructor)]
+    pub fn new(device_name: &str) -> Result<CliLoginRequest, JsValue> {
+        Ok(Self(
+            CoreCliLoginRequest::new(device_name).map_err(js_error)?,
+        ))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.0.id().to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = deviceName)]
+    pub fn device_name(&self) -> String {
+        self.0.device_name().to_owned()
+    }
+
+    #[wasm_bindgen(getter, js_name = publicKey)]
+    pub fn public_key(&self) -> String {
+        encoding::encode(&self.0.public_key())
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn mac(&self) -> String {
+        encoding::encode(self.0.mac())
+    }
+
+    /// `#/cli-login/{id}#{secret}`, to append to the web vault's URL.
+    #[wasm_bindgen(getter, js_name = linkFragment)]
+    pub fn link_fragment(&self) -> String {
+        self.0.link_fragment()
+    }
+
+    /// Opens the sealed payload (JSON).
+    pub fn open(&self, sealed: &str) -> Result<String, JsValue> {
+        self.0.open(sealed).map_err(js_error)
+    }
+}
+
+/// The signed-in browser's side of a sign-in requested by another device
+/// (`pbx login`): built from the ID and secret in the link's fragment
+/// (`#/cli-login/{id}#{secret}`).
+#[wasm_bindgen]
+pub struct CliLoginApproval(CoreCliLoginApproval);
+
+#[wasm_bindgen]
+impl CliLoginApproval {
+    /// Throws `InvalidDeviceCodeError` for a malformed ID or secret.
+    #[wasm_bindgen(constructor)]
+    pub fn new(id: &str, secret: &str) -> Result<CliLoginApproval, JsValue> {
+        Ok(Self(
+            CoreCliLoginApproval::new(id, secret).map_err(device_code_error)?,
+        ))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.0.id().to_owned()
+    }
+
+    /// Checks the key and device name the server returned (Base64url key
+    /// and MAC). Throws `InvalidDeviceCodeError` if they are not the ones
+    /// the requesting device registered.
+    pub fn verify(&self, ephemeral_key: &str, device_name: &str, mac: &str) -> Result<(), JsValue> {
+        self.0
+            .verify(
+                &encoding::decode(ephemeral_key).map_err(device_code_error)?,
+                device_name,
+                &encoding::decode(mac).map_err(device_code_error)?,
+            )
+            .map_err(device_code_error)
+    }
+
+    /// Verifies the request and seals `payload_json` to its key.
+    pub fn seal(
+        &self,
+        ephemeral_key: &str,
+        device_name: &str,
+        mac: &str,
+        payload_json: &str,
+    ) -> Result<String, JsValue> {
+        self.0
+            .seal(
+                &encoding::decode(ephemeral_key).map_err(device_code_error)?,
+                device_name,
+                &encoding::decode(mac).map_err(device_code_error)?,
+                payload_json,
+            )
+            .map_err(device_code_error)
     }
 }
 

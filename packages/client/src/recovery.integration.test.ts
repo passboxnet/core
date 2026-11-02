@@ -10,7 +10,13 @@ import * as core from "@passbox/core-wasm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { InvalidCredentialsError, PassboxClient } from "./client";
 import { FIELD, fieldValue, newItemData } from "./items";
-import { InvalidDeviceCodeError, InvalidRecoveryCodeError } from "./recovery";
+import {
+  CliLoginExpiredError,
+  CliLoginVerificationError,
+  InvalidDeviceCodeError,
+  InvalidRecoveryCodeError,
+  parseCliLoginLink,
+} from "./recovery";
 import { memoryStorage } from "./storage";
 
 const serverUrl = process.env.PASSBOX_TEST_SERVER_URL;
@@ -206,5 +212,54 @@ describe.skipIf(!serverUrl)("recovery against a server", () => {
     expect(device.getSnapshot().status).toBe("unlocked");
     // The code works once.
     await expect(newClient().claimDeviceLink(link.code)).rejects.toBeInstanceOf(InvalidDeviceCodeError);
+  });
+
+  it("signs in pbx from the browser", { timeout: 120_000 }, async () => {
+    const ada = await person("cli");
+    const api = createClient({ baseUrl: serverUrl ?? "" });
+    // The requesting device (what pbx login does, without a session).
+    const request = new core.CliLoginRequest("pbx build-box");
+    const { pollToken } = await api.cliLogins.create({
+      id: request.id,
+      ephemeralKey: request.publicKey,
+      mac: request.mac,
+      deviceName: request.deviceName,
+    });
+    expect((await api.cliLogins.poll(pollToken)).status).toBe("pending");
+    const link = parseCliLoginLink(request.linkFragment);
+    if (!link) throw new Error("no link");
+    expect(link.id).toBe(request.id);
+
+    // The browser checks the request against the link before showing it.
+    const info = await ada.client.cliLoginRequest(link.id, link.secret);
+    expect(info).toMatchObject({ id: request.id, deviceName: "pbx build-box" });
+    const other = parseCliLoginLink(new core.CliLoginRequest("x").linkFragment);
+    if (!other) throw new Error("no link");
+    await expect(ada.client.cliLoginRequest(link.id, other.secret)).rejects.toBeInstanceOf(CliLoginVerificationError);
+    await expect(ada.client.approveCliLogin(link.id, other.secret)).rejects.toBeInstanceOf(CliLoginVerificationError);
+    await ada.client.approveCliLogin(link.id, link.secret);
+
+    const answer = await api.cliLogins.poll(pollToken);
+    expect(answer.status).toBe("approved");
+    expect(JSON.parse(request.open(answer.sealedPayload ?? ""))).toEqual({
+      email: ada.email,
+      accountId: ada.id,
+      secretKey: ada.secretKey,
+    });
+    expect((await api.cliLogins.poll(pollToken)).status).toBe("expired");
+    await expect(ada.client.cliLoginRequest(link.id, link.secret)).rejects.toBeInstanceOf(CliLoginExpiredError);
+
+    // Denied requests are answered once too.
+    const denied = new core.CliLoginRequest("pbx");
+    const created = await api.cliLogins.create({
+      id: denied.id,
+      ephemeralKey: denied.publicKey,
+      mac: denied.mac,
+      deviceName: denied.deviceName,
+    });
+    await ada.client.denyCliLogin(denied.id);
+    expect((await api.cliLogins.poll(created.pollToken)).status).toBe("denied");
+    expect((await api.cliLogins.poll(created.pollToken)).status).toBe("expired");
+    await expect(ada.client.denyCliLogin(denied.id)).rejects.toBeInstanceOf(CliLoginExpiredError);
   });
 });
