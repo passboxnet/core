@@ -88,7 +88,7 @@
   "app.loading": "Loading",
   "ui.showPassword": "Show password",
   "ui.hidePassword": "Hide password",
-  "landing.headline": "Passwords that stay yours.",
+  "landing.headline": "The password manager that's a joy to use.",
   "landing.point1.title": "Not even the server can look inside",
   "landing.point1.text": "Your vault is encrypted on your device. Your master password never reaches the server, not even when you sign in.",
   "landing.point2.title": "Yours to take anywhere",

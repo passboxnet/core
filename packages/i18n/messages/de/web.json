@@ -88,7 +88,7 @@
   "app.loading": "Wird geladen",
   "ui.showPassword": "Passwort anzeigen",
   "ui.hidePassword": "Passwort verbergen",
-  "landing.headline": "Passwörter, die Ihnen gehören.",
+  "landing.headline": "Der Passwortmanager, der Freude macht.",
   "landing.point1.title": "Nicht einmal der Server sieht hinein",
   "landing.point1.text": "Ihr Tresor wird auf Ihrem Gerät verschlüsselt. Ihr Master-Passwort erreicht den Server nie, auch nicht bei der Anmeldung.",
   "landing.point2.title": "Ihre Daten bleiben Ihre Daten",
